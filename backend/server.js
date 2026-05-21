@@ -12,7 +12,7 @@ const passport    = require("passport");
 const session     = require("express-session");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
 const GitHubStrategy = require("passport-github2").Strategy;
-const { spawn }   = require("child_process");
+const { spawn, execSync }   = require("child_process");
 const fs          = require("fs");
 const path        = require("path");
 const { Server }  = require("socket.io");
@@ -576,6 +576,31 @@ app.get("/health", (_req, res) => {
 /* ═════════════════════════════════════════════════════════════════
    ████████╗  IDE  RUNNER
 ═════════════════════════════════════════════════════════════════ */
+
+/* ── Check if Docker is available ── */
+let DOCKER_AVAILABLE = false;
+try {
+  execSync("docker --version", { stdio: "ignore" });
+  DOCKER_AVAILABLE = true;
+  console.log("✅  Docker is available");
+} catch {
+  console.warn("⚠️   Docker not available — using local Python fallback");
+}
+
+/* ── Detect Python executable ── */
+let PYTHON_EXEC = null;
+try {
+  execSync("python3 --version", { stdio: "ignore" });
+  PYTHON_EXEC = "python3";
+} catch {
+  try {
+    execSync("python --version", { stdio: "ignore" });
+    PYTHON_EXEC = "python";
+  } catch {
+    console.warn("⚠️   Python not found in PATH");
+  }
+}
+
 const LANG_CONFIG = {
   python: {
     image: "python:3.11-slim",
@@ -634,6 +659,47 @@ function dockerArgs(cfg, filename, workDir) {
     cfg.image,
     "sh", "-c", `timeout 30s ${cfg.runCmd(filename)}`,
   ];
+}
+
+/* ── Execute code locally (fallback when Docker unavailable) ── */
+function runCodeLocally(language, code, stdin, workDir, filename) {
+  return new Promise((resolve) => {
+    if (language !== "python" || !PYTHON_EXEC) {
+      resolve("Python runtime unavailable. Please install Python 3 or Docker.");
+      return;
+    }
+
+    const proc = spawn(PYTHON_EXEC, [path.join(workDir, filename)], {
+      cwd: workDir,
+      timeout: 30000,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    proc.stdout.on("data", (data) => { stdout += data.toString(); });
+    proc.stderr.on("data", (data) => { stderr += data.toString(); });
+
+    if (stdin) {
+      proc.stdin.write(stdin.endsWith("\n") ? stdin : stdin + "\n");
+    }
+    proc.stdin.end();
+
+    proc.on("close", (code) => {
+      const output = (stdout + stderr).trim() || "(no output)";
+      resolve(output);
+    });
+
+    proc.on("error", (err) => {
+      resolve(`Python runtime unavailable. Please install Python 3 or Docker.`);
+    });
+
+    setTimeout(() => {
+      try { proc.kill(); } catch (_) {}
+      resolve("Execution timeout (30s exceeded)");
+    }, 31000);
+  });
 }
 
 /* Active interactive sessions */
